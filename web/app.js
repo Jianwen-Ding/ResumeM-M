@@ -20,7 +20,7 @@ import { markupFragment, plainMarkup } from './markup.js';
 import { setupCompact } from './compact.js';
 import { setupEmbed } from './embed.js';
 import { captureEditorErrors, recordEditorEvent, recordFailedRequest, setupErrorLog } from './errorlog.js';
-import { fitStatus, setupHeader } from './header.js';
+import { fitStatus, measureToolbars, setupHeader } from './header.js';
 let activeProject;
 /** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
 let compact = null;
@@ -799,7 +799,7 @@ async function stepOnce(direction) {
     for (const change of changes) {
       const back = direction === 'undo' ? change.before : change.after;
       const from = direction === 'undo' ? change.after : change.before;
-      await putBack(change.docKey, back, from);
+      await putBack(change.docKey, back, from, direction);
     }
     /*
      * The selections on screen are dropped, not kept.
@@ -871,6 +871,20 @@ async function stepOnce(direction) {
       : entry.label;
     setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${label}`);
   } catch (err) {
+    if (err.dropStep) {
+      /*
+       * A step that can never be taken now — a copy sent with an application
+       * since, or changed since — went back on top of the stack, and every
+       * step under it was out of reach for good: each press said the same
+       * refusal. It comes off, and the status says so.
+       */
+      history.forget(direction);
+      setStatus(
+        `${err.message} That step is off the ${direction} list now, so the ones ${direction === 'undo' ? 'before' : 'after'} it can be ${direction === 'undo' ? 'undone' : 'redone'}.`,
+        true,
+      );
+      return;
+    }
     // Put it back on the stack it came off: a failed undo has not happened.
     if (direction === 'undo') history.redo();
     else history.undo();
@@ -900,7 +914,7 @@ async function stepOnce(direction) {
  * back too. So the step is rebased onto what the server has now, read just
  * before, the same way: only what the step changed is taken back.
  */
-async function putBack(docKey, back, from) {
+async function putBack(docKey, back, from, direction = 'undo') {
   let { path, options } = restoreRequest(docKey, back);
   /*
    * A letter's body is put back even when it went out with an application
@@ -962,15 +976,28 @@ async function putBack(docKey, back, from) {
    * taken away only as the step left it, and not once an application names
    * it. The DELETE went out whatever had happened since: the copy edited in
    * another tab, or sent with an application, and all of it went with it.
+   *
+   * Named as the server names it (`DELETE /resumes/:id`): by an application
+   * that went out. A row still at Interested or Applying was refused here
+   * and deleted by the server without a word.
+   *
+   * Redoing a delete is a delete already confirmed — "Delete … anyway?",
+   * named with the applications it went out with — so it is not refused for
+   * them and goes with `?force=1`, which the server asks for and the first
+   * delete sent. Refused, the step could not be redone at all. Still only as
+   * the step left it: changed since, it stays.
    */
   if (id && options.method === 'DELETE') {
+    const redone = direction === 'redo';
     const store = await api('/store');
     const now = readDoc(store, docKey);
     if (now) {
       const name = now.label || id;
-      const named = (store.applications ?? []).some(
-        (a) => a.resumeId === id || (a.sentResumeIds ?? []).includes(id),
-      );
+      const named =
+        !redone &&
+        (store.applications ?? []).some(
+          (a) => appWentOut(a) && (a.resumeId === id || (a.sentResumeIds ?? []).includes(id)),
+        );
       const content = (r) => ({
         label: r?.label,
         notes: r?.notes,
@@ -980,13 +1007,23 @@ async function putBack(docKey, back, from) {
         layout: r?.layout ?? {},
       });
       if (named || !same(content(now), content(from))) {
-        throw new Error(
+        throw Object.assign(new Error(
           named
             ? `Nothing was undone: “${name}” has been filed with an application since it was made, so it was not taken away.`
-            : `Nothing was undone: “${name}” was changed since it was made, so it was not taken away.`,
+            : redone
+              ? `Nothing was redone: “${name}” was changed since it was put back, so it was not deleted again.`
+              : `Nothing was undone: “${name}” was changed since it was made, so it was not taken away.`,
+          ),
+          /*
+           * Sent is for good: not a step that will come right by waiting, so
+           * it leaves the stack (see `stepOnce`). Changed since is not — put
+           * the change back and the step can be taken — so it stays.
+           */
+          { dropStep: named },
         );
       }
     }
+    if (redone) path = `${path}${path.includes('?') ? '&' : '?'}force=1`;
   }
   if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
     const store = await api('/store');
@@ -1023,7 +1060,11 @@ async function putBack(docKey, back, from) {
 function sentLetterNow(store, letter) {
   if (!letter?.applicationId) return false;
   const app = (store?.applications ?? []).find((a) => a.id === letter.applicationId);
-  if (!app) return false;
+  return Boolean(app) && appWentOut(app);
+}
+
+/** The server's `wentOut` (src/model/tiers.ts): whether a tracker row's application went out. */
+function appWentOut(app) {
   const sent = ['applied', 'interview', 'offer'];
   if (sent.includes(app.status)) return true;
   if (app.status !== 'closed') return false;
@@ -7464,35 +7505,50 @@ async function deleteVariation() {
    * those without `force` (the tracker's row would show no resume), so they
    * are named here, and saying yes is saying so.
    */
+  /*
+   * Counted as the server counts them (`wentOut`, through `appWentOut`): a row
+   * closed before anything went out is not one, and was named here as one.
+   * The server's refusal is still the last word — see the 409 below.
+   */
   const sentWith = await api('/applications').then(
     ({ applications }) =>
       (applications ?? []).filter(
-        (a) =>
-          !['interested', 'applying'].includes(a.status) &&
-          (a.resumeId === mine.id || (a.sentResumeIds ?? []).includes(mine.id)),
+        (a) => appWentOut(a) && (a.resumeId === mine.id || (a.sentResumeIds ?? []).includes(mine.id)),
       ),
     () => [],
   );
-  const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
-    'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
-    sentWith.length > 0
-      ? `It went out with ${sentWith.length === 1 ? 'the application' : `${sentWith.length} applications`} to ${sentWith
-          .map((a) => `${a.company} (${a.role})`)
-          .join(', ')}; ${sentWith.length === 1 ? 'that row' : 'those rows'} will no longer show the resume that was sent.`
-      : null,
-    using.length > 0
-      ? `${using.length === 1 ? 'The application' : `${using.length} applications`} in the Workspace for ${using
-          .map((d) => d.company)
-          .join(', ')} ${using.length === 1 ? 'uses' : 'use'} it, and will need another resume chosen.`
-      : null,
-    // Said because the list shows where each copy came from, so the name is
-    // about to stop resolving there. Nothing about the copies themselves
-    // changes — they hold their own sections and always did.
-    copies.length > 0
-      ? `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.`
-      : null,
-    'The version history keeps it, the way it keeps a deleted entry.',
-  ].filter(Boolean).join(' '));
+  /*
+   * Said in parts, each application on a line of its own: one paragraph, the
+   * names run together with commas, was the whole answer to "what does this
+   * take with it".
+   */
+  const listOf = (items) => el('ul', { className: 'confirm-list' }, items.map((text) => el('li', { textContent: text })));
+  const ok = await showModal(
+    `Delete “${mine.label ?? mine.id}”?`,
+    el('div', {}, [
+      el('p', { textContent: 'It is removed from the save. The entries and wordings it selected are the store’s and stay.' }),
+      sentWith.length > 0
+        ? el('p', {
+            textContent: `It went out with ${sentWith.length === 1 ? 'this application' : `these ${sentWith.length} applications`}, and ${sentWith.length === 1 ? 'its row' : 'their rows'} will no longer show the resume that was sent:`,
+          })
+        : null,
+      sentWith.length > 0 ? listOf(sentWith.map((a) => `${a.company} — ${a.role}`)) : null,
+      using.length > 0
+        ? el('p', {
+            textContent: `${using.length === 1 ? 'This application' : `These ${using.length} applications`} in the Workspace ${using.length === 1 ? 'uses' : 'use'} it, and will need another resume chosen:`,
+          })
+        : null,
+      using.length > 0 ? listOf(using.map((d) => `${d.company} — ${d.role}`)) : null,
+      // Said because the list shows where each copy came from, so the name is
+      // about to stop resolving there. Nothing about the copies themselves
+      // changes — they hold their own sections and always did.
+      copies.length > 0
+        ? el('p', { textContent: `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.` })
+        : null,
+      el('p', { textContent: 'The version history keeps it, the way it keeps a deleted entry.' }),
+    ].filter(Boolean)),
+    { okLabel: 'Delete', showCancel: true },
+  );
   if (!ok) return;
 
   /*
@@ -7595,8 +7651,19 @@ async function saveAsVariation() {
    * nothing said so. It is refused now (see `?create=1`), and the refusal
    * reopens the form holding what was typed rather than throwing it away.
    */
+  /*
+   * Offered as a name and a file nobody has: "base-variant" taken by the
+   * last copy, pressing OK on what was offered was refused, every time after
+   * the first. The next free pair instead — "… variation 2", "-variant-2".
+   */
   let label = `${parentLabel} variation`;
   let filename = `${state.resumeId}-variant`;
+  const held = state.store.resumes ?? [];
+  const taken = (id, name) => held.some((r) => r.id === id || sameName(r.label ?? r.id, name));
+  for (let n = 2; taken(filename, label) && n < 100; n++) {
+    label = `${parentLabel} variation ${n}`;
+    filename = `${state.resumeId}-variant-${n}`;
+  }
   let problem = '';
   for (;;) {
     const answer = await form('Save as variation', [
@@ -7764,7 +7831,8 @@ async function createVariation(chosenId, chosenLabel) {
    */
   await flushAutoSave().catch(() => undefined);
 
-  describeNext(`Saved ${spec.id}`);
+  // Named as the list names it, not by its file: "Undo save “Kafka-heavy” as a variation".
+  describeNext(`save “${spec.label || spec.id}” as a variation`);
   /*
    * `?create=1` is this write's condition: written only where there is no
    * resume by that file or that name, checked with nothing awaited before the
@@ -8494,8 +8562,22 @@ function drawApplications({ applications, stats, current }) {
  * click, not on the re-opens a reload does, which must not move the page.
  */
 function revealApplicationDetail() {
-  if (!window.matchMedia?.('(max-width: 1150px)').matches) return;
+  if (!applicationsStacked()) return;
   $('#app-detail')?.scrollIntoView?.({ block: 'start' });
+}
+
+/*
+ * Whether the list and the pane are stacked, asked of the layout itself rather
+ * than of a width written here a second time: the stylesheet moved its
+ * breakpoint from 1150px to 1200px (`.apps-split`) and this still said 1150,
+ * so a row clicked at 1151–1200px filled a pane a long scroll away. Where
+ * nothing is laid out (a test's document), the stylesheet's width.
+ */
+function applicationsStacked() {
+  const split = $('.apps-split');
+  const columns = split ? getComputedStyle(split).gridTemplateColumns : '';
+  if (columns && columns !== 'none') return columns.trim().split(/\s+/).length === 1;
+  return Boolean(window.matchMedia?.('(max-width: 1200px)').matches);
 }
 
 /** Everything that was actually submitted for one application. */
@@ -9637,6 +9719,9 @@ function renderDraft(draft) {
     renderDraft(draft);
   };
 
+  // What tailoring decided not to do, said under its buttons. See `tailorDraft`.
+  const tailorSaid = el('div', { className: 'hint tailor-said', role: 'status' });
+
   setChildren(
     panel,
     el('div', { className: 'draft-head' }, [
@@ -9666,12 +9751,12 @@ function renderDraft(draft) {
           title: draft.url
             ? 'Read the posting and pick the phrasings that suit it'
             : 'Works from the posting text; add a link to this draft to read it automatically',
-          onclick: () => tailorDraft(draft, notes, false),
+          onclick: () => tailorDraft(draft, notes, false, tailorSaid),
         }),
         aiButton({
           label: 'Let the AI choose',
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
-          onclick: () => tailorDraft(draft, notes, true),
+          onclick: () => tailorDraft(draft, notes, true, tailorSaid),
         }),
         /*
          * The third thing you want, and the one that was missing: neither
@@ -9685,6 +9770,7 @@ function renderDraft(draft) {
           onclick: () => startVariation(draft, notes),
         }),
       ]),
+      tailorSaid,
       hasResume(draft)
         ? el('div', { className: 'toolbar' }, [
             el('button', {
@@ -9781,8 +9867,9 @@ async function startVariation(draft, notes) {
   }
 }
 
-async function tailorDraft(draft, notes, useAi) {
+async function tailorDraft(draft, notes, useAi, near = notes) {
   const doing = useAi ? 'Reading the posting' : 'Matching against the posting';
+  if (near !== notes) near.replaceChildren();
   setChildren(notes, el('div', { textContent: `${doing}…` }));
   // In the toolbar too, so leaving this panel does not lose the only sign it
   // is running. `useAi` runs for minutes; the match is instant and the chip
@@ -9800,8 +9887,21 @@ async function tailorDraft(draft, notes, useAi) {
     } catch (err) {
       // The copy was edited by hand since it was tailored: asked, not replaced.
       if (err.status !== 409 || err.body?.kind !== 'edited') throw err;
-      if (!confirm('The tailored copy has edits made since it was tailored — tailoring again replaces them. Continue?')) {
-        setChildren(notes, el('div', { className: 'hint', textContent: 'Not tailored again: the edits to the copy are kept.' }));
+      /*
+       * Asked in the editor's own dialog, as every other question here is, with
+       * the button saying what it does. And the answer said under the button
+       * that was pressed: written to the notes at the foot of the panel, "Not
+       * tailored again" was a long scroll from where anybody was looking.
+       */
+      const name = resumeById(err.body.resumeId)?.label ?? err.body.resumeId ?? 'The tailored copy';
+      const replace = await showModal(
+        'Replace your edits?',
+        el('p', { textContent: `“${name}” has edits made since it was tailored. Tailoring again rebuilds it from its base resume, and those edits go.` }),
+        { okLabel: 'Replace my edits', showCancel: true, cancelLabel: 'Keep my edits' },
+      );
+      if (!replace) {
+        notes.replaceChildren();
+        setChildren(near, el('div', { textContent: 'Not tailored again: the edits to the copy are kept.' }));
         return;
       }
       res = await tailor(true);
@@ -14053,6 +14153,8 @@ function setupTabs() {
     btn.onclick = () => {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
+      // The new tab's toolbar, before anything scrolls to a place in it. See `measureToolbars`.
+      measureToolbars();
       if (btn.dataset.tab === 'resumes') scheduleRender();
       if (btn.dataset.tab === 'save') {
         assetUI.load().catch((e) => setStatus(e.message, true));

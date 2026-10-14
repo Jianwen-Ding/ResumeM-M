@@ -146,27 +146,51 @@ describe('what the Workspace says a tailoring run did', () => {
    * there, and a wording chosen by hand on the copy since went without a
    * word. The server refuses that now unless told to; the panel asks.
    */
-  it('asks before tailoring again over a copy edited since, and replaces it only when told to', async () => {
-    editedSince = true;
-    const asked = [];
-    vi.stubGlobal('confirm', (q) => {
-      asked.push(q);
-      return true;
-    });
-    const said = await tailorAndRead();
-    expect(asked).toEqual(['The tailored copy has edits made since it was tailored — tailoring again replaces them. Continue?']);
-    expect(tailorBodies.map((b) => Boolean(b.overwrite))).toEqual([false, true]);
-    expect(said).toMatch(/Made "Data Platform Intern — Streamly"/);
-  });
-
-  it('keeps the edits when the answer is no', async () => {
-    editedSince = true;
-    vi.stubGlobal('confirm', () => false);
+  /** The question, once it is up: in the editor's own dialog, not the browser's. */
+  async function asked() {
+    await vi.waitFor(() => expect(document.querySelector('#modal').classList.contains('hidden')).toBe(false));
+    return {
+      title: document.querySelector('#modal-title').textContent,
+      body: document.querySelector('#modal-content').textContent,
+      ok: document.querySelector('#modal-ok').textContent,
+      cancel: document.querySelector('#modal-cancel').textContent,
+    };
+  }
+  const pressTailor = () =>
     [...document.querySelectorAll('#draft-editor button')]
       .find((b) => /Tailor one for this posting/.test(b.textContent))
       .click();
+
+  it('asks before tailoring again over a copy edited since, and replaces it only when told to', async () => {
+    editedSince = true;
+    const native = vi.fn(() => true);
+    vi.stubGlobal('confirm', native);
+    pressTailor();
+    const question = await asked();
+    expect(native).not.toHaveBeenCalled();
+    expect(question.ok).toBe('Replace my edits');
+    expect(question.cancel).toBe('Keep my edits');
+    expect(question.body).toMatch(/edits made since it was tailored/);
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() =>
+      expect(document.querySelector('#draft-editor').textContent).toMatch(/from the resume it started from/),
+    );
+    expect(tailorBodies.map((b) => Boolean(b.overwrite))).toEqual([false, true]);
+    expect(document.querySelector('#draft-editor').textContent).toMatch(/Made "Data Platform Intern — Streamly"/);
+  });
+
+  it('keeps the edits when the answer is no, and says so under the button', async () => {
+    editedSince = true;
+    pressTailor();
+    await asked();
+    document.querySelector('#modal-cancel').click();
     await vi.waitFor(() => expect(document.querySelector('#draft-editor').textContent).toMatch(/edits to the copy are kept/));
     expect(tailorBodies).toHaveLength(1);
+    // Right under the row of tailoring buttons, not in the notes at the foot of the panel.
+    const said = document.querySelector('#draft-editor .tailor-said');
+    expect(said?.textContent).toMatch(/edits to the copy are kept/);
+    const buttons = [...document.querySelectorAll('#draft-editor button')].find((b) => /Tailor one for this posting/.test(b.textContent));
+    expect(said.previousElementSibling).toBe(buttons.closest('.toolbar'));
   });
 
   /*

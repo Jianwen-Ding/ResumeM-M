@@ -1755,6 +1755,82 @@ async function main() {
       }
     }
 
+    /*
+     * Undo and redo of a resume taken away, against what the server counts:
+     * an application that went out. Redoing a delete already confirmed was
+     * refused for the application it went out with, and sent no `force`;
+     * undoing "Save as variation" was refused for a row at Interested, which
+     * the server would have let go.
+     */
+    console.log('\nTaking a resume away again, by undo and by redo');
+    {
+      const listed = async () => (await (await fetch(`${server.url}/api/resumes`)).json()).map((r) => r.id);
+      const json = { 'Content-Type': 'application/json' };
+      const record = async (company, status, resumeId) =>
+        (
+          await (
+            await fetch(`${server.url}/api/applications`, {
+              method: 'POST',
+              headers: json,
+              body: JSON.stringify({ company, role: 'Redo Probe Engineer', status, resumeId }),
+            })
+          ).json()
+        );
+      const rows = [];
+      const probe = 'redo-sent-probe';
+      try {
+        await fetch(`${server.url}/api/resumes/${probe}?commit=0`, {
+          method: 'PUT',
+          headers: json,
+          body: JSON.stringify({ label: 'Redo sent probe', tier: 'extended', sections: [] }),
+        });
+        rows.push(await record('Redo Sent Co', 'applied', probe));
+        await reloaded();
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.selectOption('#resume-select', probe);
+        await pickerSays('Redo sent probe');
+        await page.locator('#btn-delete-resume').click();
+        await dialogUp();
+        await page.locator('#modal-ok').click();
+        const gone = () => pollFor(async () => !(await listed()).includes(probe));
+        const back = () => pollFor(async () => (await listed()).includes(probe));
+        check('a resume an application went out with is deleted, once confirmed', await gone());
+        await page.locator('#btn-undo').click();
+        check('undo puts it back', await back());
+        await settled(/\/api\//);
+        await page.locator('#btn-redo').click();
+        const redone = await gone();
+        const said = await page.locator('#status').innerText().catch(() => '');
+        check('and redo deletes it again, as confirmed, without asking twice', redone, said);
+
+        // A row at Interested is not one it went out with: the server lets the copy go, and so does undo.
+        await page.selectOption('#resume-select', (await listed())[0]);
+        await settled(/\/api\//);
+        await page.locator('#btn-save-as').click();
+        await dialogUp();
+        await page.locator('#f_label').fill('Undo interested probe');
+        await page.locator('#f_id').fill('undo-interested-probe');
+        await page.locator('#modal-ok').click();
+        await pickerSays('Undo interested probe');
+        rows.push(await record('Undo Interested Co', 'interested', 'undo-interested-probe'));
+        await settled(/\/api\//);
+        await page.locator('#btn-undo').click();
+        const undone = await pollFor(async () => !(await listed()).includes('undo-interested-probe'));
+        const note = await page.locator('#status').innerText().catch(() => '');
+        check('undoing "Save as variation" takes it away when only an unsent application names it', undone, note);
+      } finally {
+        for (const row of rows) {
+          const id = row?.id ?? row?.application?.id;
+          if (id) await fetch(`${server.url}/api/applications/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => undefined);
+        }
+        for (const id of [probe, 'undo-interested-probe']) {
+          await fetch(`${server.url}/api/resumes/${id}?force=1`, { method: 'DELETE' }).catch(() => undefined);
+        }
+        await reloaded();
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+      }
+    }
+
     /* -------------------------------------------------------------- *
      * Arranging every resume at once                                   *
      * -------------------------------------------------------------- *
@@ -3452,6 +3528,162 @@ async function main() {
         }));
       }
       check('the tracker shows each stage whole and never scrolls sideways', stages.every((s) => s.rows > 0 && s.cut === 0 && s.over <= 0), JSON.stringify(stages));
+
+      /*
+       * The header laid out while an error floated in the corner: the status
+       * line's room was not asked after, so a resize then left the tabs on
+       * the one row once the error went, beside a status line 68px wide at
+       * 1294px. Laid out as if no error showed, it is what a fresh fit gives.
+       */
+      const afterToast = await at(1290, 900, async (p) => {
+        const read = () =>
+          p.evaluate(() => ({
+            cls: document.querySelector('header').className,
+            sw: Math.round(document.querySelector('#status').getBoundingClientRect().width),
+          }));
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          s.className = 'status';
+          s.textContent = 'Status updated';
+        });
+        await sayError(p, `${LONG_ERR} ${LONG_ERR} ${LONG_ERR}`);
+        const toast = await p.evaluate(() => document.querySelector('#status').classList.contains('toast'));
+        await p.setViewportSize({ width: 1294, height: 900 });
+        // Until the resize's refit has run: two frames.
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        await p.evaluate(async () => {
+          const { dismissStatus } = await import('/header.js');
+          dismissStatus();
+          document.querySelector('#status').textContent = 'Status updated';
+        });
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        const left = await read();
+        await p.evaluate(async () => (await import('/header.js')).fitHeader());
+        return { toast, left, fresh: await read() };
+      });
+      check(
+        'a resize while an error floats leaves the header as a fresh fit has it once the error goes',
+        afterToast.toast && afterToast.left.cls === afterToast.fresh.cls && afterToast.left.sw === afterToast.fresh.sw && afterToast.left.sw >= 120,
+        JSON.stringify(afterToast),
+      );
+
+      /*
+       * The AI chips out at once — drafting, results, the peek — on the first
+       * of two rows: at 640–805px the status line came to nothing and the "!"
+       * had a row of its own (a header 110–147px tall). And "Voice & AI" alone
+       * on a third row at 645–765px. And the "!" beside the status line in
+       * both layouts, not on the far side of the chips in one of them.
+       */
+      const chipsOut = (p) =>
+        p.evaluate(() => {
+          const d = document.getElementById('drafting-chip');
+          d.textContent = 'Drafting feedback';
+          d.classList.remove('hidden');
+          const j = document.getElementById('jobs-chip');
+          j.textContent = '1 AI result ready';
+          j.classList.remove('hidden');
+          const s = document.getElementById('status');
+          s.className = 'status';
+          s.textContent = 'Saved';
+        });
+      const chipRow = [];
+      for (const width of [775, 730, 700]) {
+        chipRow.push(await at(width, 800, async (p) => {
+          await chipsOut(p);
+          await p.evaluate(async () => (await import('/header.js')).fitHeader());
+          return p.evaluate((width) => {
+            const h = document.querySelector('header');
+            const s = document.getElementById('status').getBoundingClientRect();
+            const mark = document.getElementById('error-log-chip').getBoundingClientRect();
+            const rows = new Set([...document.querySelectorAll('#tabs button')].map((b) => Math.round(b.getBoundingClientRect().top))).size;
+            return { width, h: Math.round(h.getBoundingClientRect().height), status: Math.round(s.width), markBeside: Math.abs(mark.top - s.top) < 20 && mark.left >= s.right - 1, tabRows: rows };
+          }, width);
+        }));
+      }
+      check(
+        'with every AI chip out at 700–775px the status line keeps its room, the "!" its place, and the tabs one row',
+        chipRow.every((c) => c.h <= 90 && c.status >= 120 && c.markBeside && c.tabRows === 1),
+        JSON.stringify(chipRow),
+      );
+      const beside = [];
+      for (const width of [1500, 1250]) {
+        beside.push(await at(width, 800, async (p) => {
+          await p.evaluate(() => { const s = document.getElementById('status'); s.className = 'status'; s.textContent = 'Saved'; });
+          await p.evaluate(async () => (await import('/header.js')).fitHeader());
+          return p.evaluate(() => {
+            const order = ['ai-peek-chip', 'status', 'error-log-chip']
+              .map((id) => document.getElementById(id))
+              .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+              .map((e) => e.id);
+            return { rows: document.querySelector('header').classList.contains('tabs-row'), order: order.join(' ') };
+          });
+        }));
+      }
+      check(
+        'the "!" is right after the status line on one row and on two',
+        beside.some((b) => b.rows) && beside.some((b) => !b.rows) && beside.every((b) => b.order === 'ai-peek-chip status error-log-chip'),
+        JSON.stringify(beside),
+      );
+
+      /*
+       * A link into another tab lands where it points: "Open the error log"
+       * scrolled before the new tab's toolbar height was measured, with the
+       * builder's toolbar still in the scroll padding, and landed 100–140px low.
+       */
+      const jump = await at(1280, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.waitForTimeout(300);
+        return p.evaluate(() => {
+          const root = document.documentElement;
+          const was = parseFloat(root.style.getPropertyValue('--toolbar-h')) || 0;
+          document.querySelector('#tabs button[data-tab="save"]').click();
+          const bars = [...document.querySelectorAll('.sticky-toolbar')];
+          const actual = Math.max(0, ...bars.map((b) => b.offsetHeight));
+          return { was, now: parseFloat(root.style.getPropertyValue('--toolbar-h')) || 0, actual };
+        });
+      });
+      check('switching tabs measures the new tab’s toolbar before anything scrolls', jump.was > 0 && jump.now === jump.actual, JSON.stringify(jump));
+
+      /*
+       * The tracker: stacked over the record at 1151–1200px, a row clicked
+       * far down brings the record into view (the page still asked about
+       * 1150px). And no sideways scroll in the table down to a phone.
+       */
+      const seeded = [];
+      for (let i = 1; i <= 12; i++) {
+        const r = await fetch(`${server.url}/api/applications`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company: `Reveal Probe ${i}`, role: 'Engineer', status: 'applied', url: `https://example.com/reveal/${i}` }),
+        }).then((r) => r.json()).catch(() => ({}));
+        seeded.push(r.id ?? r.application?.id);
+      }
+      try {
+        const reveal = await at(1180, 800, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+          await p.locator('#apps-wrap tbody tr:not(.group)').nth(10).waitFor({ timeout: 10_000 }).catch(() => {});
+          const row = p.locator('#apps-wrap tbody tr:not(.group)').nth(10);
+          await row.scrollIntoViewIfNeeded().catch(() => {});
+          await row.locator('td').nth(1).click().catch(() => {});
+          await p.waitForTimeout(800);
+          return p.evaluate(() => { const r = document.getElementById('app-detail').getBoundingClientRect(); return { top: Math.round(r.top), inView: r.top < innerHeight && r.bottom > 0 }; });
+        });
+        check('a row clicked at 1180px brings its record into view', reveal.inView, JSON.stringify(reveal));
+        const sideways = [];
+        for (const width of [776, 720, 390]) {
+          sideways.push(await at(width, 800, async (p) => {
+            await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+            await p.locator('#apps-wrap tbody tr').first().waitFor({ timeout: 10_000 }).catch(() => {});
+            return p.evaluate((width) => {
+              const wrap = document.querySelector('#apps-wrap');
+              return { width, over: wrap.scrollWidth - wrap.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+            }, width);
+          }));
+        }
+        check('the tracker does not scroll sideways at 776, 720 or 390px', sideways.every((s) => s.over <= 0 && s.page <= 0), JSON.stringify(sideways));
+      } finally {
+        for (const id of seeded) if (id) await fetch(`${server.url}/api/applications/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => undefined);
+      }
 
       /* At 320px the save's name said "Save: …" even when it was "data". */
       const chip = await at(320, 600, (p) =>

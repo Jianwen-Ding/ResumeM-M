@@ -316,6 +316,16 @@ export function createHistory({ limit = 50 } = {}) {
       return had;
     },
 
+    /**
+     * Throw away the step just moved by `undo()` or `redo()` — named by which
+     * of the two moved it — when it cannot be applied now or later. Put back
+     * on its stack, it sat on top refusing every press, and nothing under it
+     * could be reached.
+     */
+    forget(direction) {
+      return (direction === 'undo' ? future : past).pop() ? true : false;
+    },
+
     canUndo: () => past.length > 0,
     canRedo: () => future.length > 0,
 

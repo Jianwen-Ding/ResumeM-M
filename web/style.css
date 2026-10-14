@@ -116,10 +116,26 @@ header.tabs-row #tabs {
 /* The status line takes only what the row has left, and is cut short with
    its title holding the rest: as wide as its words, a long one pushed "Log an
    error" onto a row of its own at 641–870px, and the header grew under it.
-   It fills the gap before the AI chips, so they stay at the right as they
-   were rather than wherever its words happen to end. */
-header.tabs-row #status { flex: 1 1 0; max-width: none; order: 1; }
-header.tabs-row .jobs-chip, header.tabs-row #error-log-chip, header.tabs-row #status-dismiss { order: 2; }
+   It fills the gap after the AI chips, its words at its right end beside
+   the "!". */
+header.tabs-row #status { flex: 1 1 0; max-width: none; }
+/* But not an error floating in the corner: that is as wide as `.status.err.toast` says, at any width. */
+header.tabs-row #status.toast { max-width: min(560px, calc(100vw - 16px)); }
+/* In the order they are in the page, as on one row: the "!" beside the status
+   line, and Tab going through them in the order they are seen. Moved after
+   the status line here, the AI chips put themselves between it and the "!",
+   and the "!" jumped from one side of them to the other at the width the
+   tabs took a row of their own. */
+/* Where the first row is still short of room for the status line (header.js
+   folds these in turn): the peek while the drafting chip shows, which opens
+   the same run, and then the app's name, as on a phone. */
+header.tabs-row.fold-peek #drafting-chip:not(.hidden) ~ #ai-peek-chip { display: none; }
+header.tabs-row.fold-name h1 { font-size: 0; gap: 0; }
+/* Narrower tabs on their own row up to 800px: at 645–765px "Voice & AI"
+   went onto a third row by itself. */
+@media (max-width: 800px) { header.tabs-row nav button { padding: 7px 9px; } }
+/* What tailoring decided not to do, under its buttons (see `tailorDraft`); nothing when it has nothing to say. */
+.tailor-said:empty { display: none; }
 
 /*
  * What is scrolled into view — by Tab and Shift+Tab, by a find, by a link —
@@ -1259,8 +1275,38 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 #apps-wrap td.app-status select { width: auto; max-width: 100%; }
 /* To 1520px, not 1400: "Enclosed" coming back at 1401 squeezed Company and
    Role so far that the table grew by a fifth in one pixel. */
-@media (min-width: 1201px) and (max-width: 1520px) {
+/* And at every width below that: stacked over the record, the table had the
+   column back, and it held the table at 748px wide, scrolling sideways below
+   about 776px. The record says what was enclosed. */
+@media (max-width: 1520px) {
   #apps-wrap th:nth-child(6), #apps-wrap td:nth-child(6) { display: none; }
+}
+/* The day it was sent is in the record too, and the history. */
+@media (max-width: 800px) {
+  #apps-wrap th:nth-child(5), #apps-wrap td:nth-child(5) { display: none; }
+}
+/* On a phone, each application as a short card rather than a row wider than
+   the screen: the company with the day it was started, the role, and the
+   stage with Edit and Remove. */
+@media (max-width: 480px) {
+  #apps-wrap thead { display: none; }
+  #apps-wrap table, #apps-wrap tbody { display: block; width: 100%; }
+  #apps-wrap tbody tr:not(.group) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 10px;
+    align-items: center;
+    padding: 8px 4px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  #apps-wrap tbody tr.group { display: block; }
+  #apps-wrap tbody tr.group td { display: block; }
+  #apps-wrap tbody tr:not(.group) td { border-bottom: 0; padding: 2px 0; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(2) { grid-column: 1; grid-row: 1; font-weight: 500; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(1) { grid-column: 2; grid-row: 1; text-align: right; color: var(--muted); font-size: 12px; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(4) { grid-column: 1; grid-row: 3; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(7) { grid-column: 2; grid-row: 3; text-align: right; white-space: nowrap; }
 }
 
 tbody tr.selected { background: var(--accent-soft); }
@@ -2588,3 +2634,7 @@ header.log-mark-only .error-log-chip-label {
 .error-log-contact[hidden] { display: none; }
 /* A paired extension: its name, with the short id after it. The full origin is the title. */
 .ext-id { font-family: var(--mono); }
+
+/* The applications a delete takes the resume from, one to a line (see `deleteVariation`). */
+.confirm-list { margin: 4px 0 10px; padding-left: 20px; }
+.confirm-list li { margin: 2px 0; }

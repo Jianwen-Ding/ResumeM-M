@@ -126,6 +126,10 @@ describe('feedback while editing', () => {
     second.querySelector('.editable').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(firstActions.every(action => action.hidden)).toBe(true);
     expect(second.classList.contains('tools-open')).toBe(true);
+    // The first Escape only leaves the edit, keeping the focus on the line; the second folds the actions away.
+    second.querySelector('.editable').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(second.classList.contains('tools-open')).toBe(true);
+    expect(second.querySelector('.editable').classList.contains('editing')).toBe(false);
     second.querySelector('.editable').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(second.classList.contains('tools-open')).toBe(false);
     expect(document.activeElement).toBe(second.querySelector('.bullet-more'));

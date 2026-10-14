@@ -113,6 +113,13 @@ const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?!
  * 6175550134", "SMS number") and not in "Mobile build 2024061512".
  */
 const PHONE_WORD = String.raw`\b(?:phones?|tel|telephone|cell(?:phone)?|whatsapp|(?:mobile|sms)(?=\W*(?:phones?\b|numbers?\b|no\b|nr\b|line\b|#|\+?\d)))\b`;
+/*
+ * A word for the number itself, between the phone word and the name: "Phone
+ * number ID 6175550134", "Phone no. id: …", "whatsapp user id …", "cell
+ * number id=…" are phone numbers as "Phone ID …" is, and the name of an id
+ * alone ("ID") let them through as a machine's.
+ */
+const PHONE_NUMBER_WORD = String.raw`(?:\W{0,3}(?:numbers?|no|nr|num|user)\b)?`;
 const PHONE_SAID = String.raw`${PHONE_WORD}\W*(?:\w+\W+){0,3}`;
 /*
  * One unbroken run of a phone's digits with "phone" or its like a few words
@@ -127,7 +134,7 @@ const NOT_PHONE: RegExp[] = [
   new RegExp(`(?<![\\w.-])(?:${DAY}(?:[T ]${CLOCK})?|${DAY_FIRST}(?:,?\\s+${CLOCK})?)(?![\\w])`, 'g'),
   /(?<![\w.+-]|\d[\s().-]{1,3})1\d{12}(?![\w]|[\s().-]{1,3}\d)/g,
   new RegExp(
-    String.raw`(?<=\b(?<!${PHONE_WORD}\W{0,3})(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
+    String.raw`(?<=\b(?<!${PHONE_WORD}${PHONE_NUMBER_WORD}\W{0,3})(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
     'gi',
   ),
   /(?<![\w.+-]|\d[\s().-]{1,3})\d+(?=\s?(?:ms|sec|bytes|KB|MB|GB|KiB|MiB|GiB|pt|px)\b)/g,

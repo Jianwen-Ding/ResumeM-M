@@ -381,7 +381,8 @@ describe('saying what a delete costs before it happens', () => {
  * the list could only ever grow, and the picker is where that cost is paid.
  */
 describe('deleting a variation', () => {
-  const modalNote = () => document.querySelector('#modal p')?.textContent ?? '';
+  // The whole of what it says: in parts now, the applications listed one to a line.
+  const modalNote = () => document.querySelector('#modal-content')?.textContent ?? '';
 
   it('offers it on a variation', async () => {
     await open();
@@ -449,13 +450,44 @@ describe('deleting a variation', () => {
     try {
       document.querySelector('#btn-delete-resume').click();
       await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
-      expect(modalNote()).toMatch(/went out with the application to Acme \(Backend Intern\)/);
+      expect(modalNote()).toMatch(/went out with this application/);
+      expect([...document.querySelectorAll('#modal-content li')].map((li) => li.textContent)).toEqual(['Acme — Backend Intern']);
       document.querySelector('#modal-ok').click();
       await vi.waitFor(() => expect(deleted).toEqual([openOne]));
       expect(deleteUrls.every((u) => /force=1/.test(u))).toBe(true);
     } finally {
       trackerRows = [];
       refuseInUse = false;
+    }
+  });
+
+  /*
+   * Counted as the server counts them (`wentOut`): a row closed before
+   * anything went out is not one. It was named here as one, and the delete
+   * went with a force the server would not have asked for.
+   */
+  it('does not name an application closed before it went out', async () => {
+    await open();
+    const openOne = document.querySelector('#resume-select').value;
+    trackerRows = [
+      {
+        id: 'initech-1',
+        company: 'Initech',
+        role: 'Intern',
+        status: 'closed',
+        resumeId: openOne,
+        history: [{ status: 'interested', at: '2026-10-01' }, { status: 'closed', at: '2026-10-02' }],
+      },
+    ];
+    try {
+      document.querySelector('#btn-delete-resume').click();
+      await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+      expect(modalNote()).not.toMatch(/Initech|went out with/);
+      document.querySelector('#modal-ok').click();
+      await vi.waitFor(() => expect(deleted).toEqual([openOne]));
+      expect(deleteUrls.every((u) => !/force=1/.test(u))).toBe(true);
+    } finally {
+      trackerRows = [];
     }
   });
 

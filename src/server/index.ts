@@ -189,19 +189,41 @@ export async function openSave(store: Store, repo: Repo): Promise<void> {
  * upgrade's migrations and committed them, and only then failed to listen.
  */
 export function portFree(port: number, host = '127.0.0.1'): Promise<boolean> {
+  return portTrouble(port, host).then((trouble) => !trouble);
+}
+
+/**
+ * Why `port` cannot be listened on, or undefined when it can: `in-use` when
+ * another server holds it, `denied` when listening on it needs a permission
+ * this process does not have — a port below 1024 for anyone but root. The
+ * second was reported as the first, "already in use — is ResumeM-M already
+ * running?", and the answer to that was no.
+ */
+export function portTrouble(port: number, host = '127.0.0.1'): Promise<'in-use' | 'denied' | undefined> {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
     probe.once('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') resolve(false);
+      if (err.code === 'EADDRINUSE') resolve('in-use');
+      else if (err.code === 'EACCES' || err.code === 'EPERM') resolve('denied');
       else reject(err);
     });
-    probe.listen(port, host, () => probe.close(() => resolve(true)));
+    probe.listen(port, host, () => probe.close(() => resolve(undefined)));
   });
 }
 
 /** What `rmm serve` says when its port is taken. */
 export function portInUseMessage(port: number): string {
   return `Port ${port} is already in use — is ResumeM-M already running? Use --port to pick another.`;
+}
+
+/** What `rmm serve` says when its port needs a permission it does not have. */
+export function portDeniedMessage(port: number): string {
+  return `Port ${port} needs permission to listen on — pick a port above 1024 with --port.`;
+}
+
+/** What `rmm serve` says for a port it cannot listen on, by why (`portTrouble`). */
+export function portMessage(port: number, trouble: 'in-use' | 'denied'): string {
+  return trouble === 'denied' ? portDeniedMessage(port) : portInUseMessage(port);
 }
 
 /** Errors from reading a request's body, as JSON for the API, and never a stack trace. */
@@ -233,8 +255,9 @@ export async function startServer(opts: ServerOptions = {}) {
    * The port before the save: see `portFree`. Port 0 is any free one, and
    * always is.
    */
-  if (port !== 0 && !(await portFree(port, host))) {
-    throw Object.assign(new Error(portInUseMessage(port)), { code: 'EADDRINUSE', port });
+  const trouble = port !== 0 ? await portTrouble(port, host) : undefined;
+  if (trouble) {
+    throw Object.assign(new Error(portMessage(port, trouble)), { code: trouble === 'denied' ? 'EACCES' : 'EADDRINUSE', port });
   }
   const preferencesFile = opts.preferencesFile ?? projectsFile();
   const preferences = readProjects(preferencesFile);

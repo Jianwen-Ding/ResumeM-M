@@ -99,7 +99,7 @@ describe('"2027 Summer | Software Engineer Intern (AI Infra Compute) - 2027 Summ
     expect(job.company).toBeUndefined();
     expect(job.title).toBe(TITLE);
     const analyze = await analyzer();
-    expect(await analyze(URL, TITLE, html)).toEqual({ company: 'ByteDance', role: TITLE, at: expect.any(String), url: URL });
+    expect(await analyze(URL, TITLE, html)).toEqual({ company: 'ByteDance', role: TITLE, at: expect.any(String), url: URL, tailored: expect.any(String) });
   });
 });
 

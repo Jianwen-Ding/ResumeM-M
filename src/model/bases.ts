@@ -196,6 +196,28 @@ export function tailoredFingerprint(spec: ResumeSpec): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
+/**
+ * `spec` with `generatedFor.tailored` recorded, for any path that writes a
+ * tailored copy's content — the extension's analysis, filing a copy from
+ * JobHelper's card, starting a variation — and not only the workspace's
+ * Tailor. Those wrote the copy with no fingerprint, and a copy without one
+ * reads as never edited, so tailoring again wrote over a hand edit made to a
+ * copy JobHelper had filed without a word.
+ *
+ * `held` is the copy as the save has it now. When what is written is what is
+ * already there — the card filing again the copy it read back — the
+ * fingerprint already recorded stays: recording a fresh one would make an
+ * edit made since the last tailoring read as the tailoring itself. A spec
+ * with no `generatedFor` is not a tailored copy and is left as it is.
+ */
+export function withTailoredFingerprint(spec: ResumeSpec, held?: ResumeSpec): ResumeSpec {
+  if (!spec.generatedFor) return spec;
+  const now = tailoredFingerprint(spec);
+  const kept = held?.generatedFor?.tailored;
+  const tailored = typeof kept === 'string' && tailoredFingerprint(held!) === now ? kept : now;
+  return { ...spec, generatedFor: { ...spec.generatedFor, tailored } };
+}
+
 /** Whether a tailored copy was changed since Tailor last wrote it. Unknown (never recorded) is not. */
 export function editedSinceTailored(spec: ResumeSpec): boolean {
   const recorded = spec.generatedFor?.tailored;

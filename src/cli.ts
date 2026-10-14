@@ -16,7 +16,7 @@ import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { StoreConfig, WritingSample } from './model/types.js';
-import { portFree, portInUseMessage, startServer } from './server/index.js';
+import { portMessage, portTrouble, startServer } from './server/index.js';
 import { ErrorLog, appVersion } from './errorlog/log.js';
 import { windowMinutes, type LogEvent } from './errorlog/buffer.js';
 
@@ -1002,19 +1002,22 @@ async function main(argv: string[]): Promise<number> {
       /*
        * The port before anything is written: on a port another server held,
        * the save was opened, upgraded and committed, and then the listen
-       * failed with Node's raw EADDRINUSE. See `portFree`.
+       * failed with Node's raw EADDRINUSE. See `portTrouble`, which also
+       * tells a port that needs permission from one that is in use.
        */
       const wanted = port ? Number(port) : Number(process.env.PORT ?? 4600);
-      if (wanted !== 0 && !(await portFree(wanted))) {
-        console.error(portInUseMessage(wanted));
+      const trouble = wanted !== 0 ? await portTrouble(wanted) : undefined;
+      if (trouble) {
+        console.error(portMessage(wanted, trouble));
         return 1;
       }
       await repo.ensure();
       try {
         await startServer({ port: port ? Number(port) : undefined, dataDir });
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw err;
-        console.error(portInUseMessage(wanted));
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EADDRINUSE' && code !== 'EACCES') throw err;
+        console.error(portMessage(wanted, code === 'EACCES' ? 'denied' : 'in-use'));
         return 1;
       }
       return new Promise<number>(() => {

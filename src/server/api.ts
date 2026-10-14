@@ -55,7 +55,7 @@ import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { AlreadySent, OPENED_UNASKED_NOTE, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, differentPosting, samePosting, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, editedSinceTailored, standingBase, tailoredFingerprint } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, editedSinceTailored, standingBase, tailoredFingerprint, withTailoredFingerprint } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { FRAME_ANCESTORS } from './guard.js';
@@ -1880,6 +1880,16 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
       // Tagged as written, before the commit's awaits let another write in.
       await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () => {
+        /*
+         * A write that says what the copy was made for and not what its
+         * tailoring was — a client that does not know the field — keeps the
+         * one recorded: dropped, an edit made here would read as untouched
+         * and tailoring again would replace it. See `editedSinceTailored`.
+         */
+        if (flat.generatedFor && flat.generatedFor.tailored === undefined) {
+          const recorded = store.loadResumes().find((r) => r.id === flat.id)?.generatedFor?.tailored;
+          if (typeof recorded === 'string') flat.generatedFor = { ...flat.generatedFor, tailored: recorded };
+        }
         store.saveResume(flat);
         tag();
         // What the next save from this page may be based on: see `ownWriteSince`.
@@ -4205,6 +4215,9 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       // is allowed to do. Merged over whatever deriveSpec built for skills.
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
       if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
+      // What Tailor made, as the workspace's Tailor records it: the copy this is
+      // filed as is then known for what it was. See `withTailoredFingerprint`.
+      spec.generatedFor = { ...spec.generatedFor, tailored: tailoredFingerprint(spec) };
 
       // What the tailoring actually did to the document, in the same words the
       // version history uses: the sentence it replaced and the one it chose.
@@ -5285,12 +5298,15 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * and the card takes the edit (see `movedOn`).
          */
         if (movedOn(res, spec.id, basedOn)) return;
-        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
-          store.saveResume(spec);
+        // What it holds is what was tailored, so tailoring again can tell an edit made since. See `withTailoredFingerprint`.
+        const written = await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
+          const stamped = withTailoredFingerprint(spec, store.loadResumes().find((r) => r.id === spec.id));
+          store.saveResume(stamped);
           resumeVersionNow = resumeVersion(spec.id);
+          return stamped;
         });
-        body.spec = spec;
-        body.resumeId = spec.id;
+        body.spec = written;
+        body.resumeId = written.id;
       }
 
       let result: Awaited<ReturnType<typeof buildBundle>>;
@@ -5622,9 +5638,12 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         // button and its keeper both file the copy here. See `movedOn`.
         if (movedOn(res, spec.id, (req.body as { basedOn?: unknown }).basedOn)) return;
         body.spec = spec;
-        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
-          store.saveResume(spec);
+        // What it holds is what was tailored. See `withTailoredFingerprint`.
+        body.spec = await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
+          const stamped = withTailoredFingerprint(spec, store.loadResumes().find((r) => r.id === spec.id));
+          store.saveResume(stamped);
           resumeVersionNow = resumeVersion(spec.id);
+          return stamped;
         });
       }
 
@@ -6035,7 +6054,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * shows", and it has to go on meaning that now that nothing resolves
        * through the base at render time.
        */
-      const spec: ResumeSpec = {
+      let spec: ResumeSpec = {
         ...base,
         id,
         label: label?.trim() || `${draft.role} — ${draft.company}`,
@@ -6048,6 +6067,8 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       delete spec.notes;
       delete spec.collapsed;
       delete spec.extends;
+      // As it starts, so Tailor run on it later can tell an edit made in the builder. See `withTailoredFingerprint`.
+      spec = withTailoredFingerprint(spec);
 
       await withCommit(repo, autoCommit(), `Start a resume variation for ${draft.company}`, () =>
         store.saveResume(spec),
@@ -6098,6 +6119,26 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
           error: `“${held.label ?? held.id}” has edits made since it was tailored. Tailoring again replaces them.`,
         });
 
+      /*
+       * Where the copy is written, and whether that copy has edits made since
+       * it was tailored, before the posting is fetched: said first and done
+       * last, the check ran after the fetch, so a refused request fetched the
+       * posting, and the confirmed one fetched it again.
+       */
+      const specId = copyIdForPosting(data.resumes, draft.company, draft.role, {
+        url: draft.url,
+        draftId: draft.id,
+        resumeId: draft.resumeId,
+        drafts: store.loadDrafts(),
+      });
+      if (overwrite !== true) {
+        const held = editedCopy(specId);
+        if (held) {
+          refuseEdited(held);
+          return;
+        }
+      }
+
       // The posting text: fetched from the link when there is one, falling
       // back to whatever the draft already carries.
       let html = draft.jobDescription ?? '';
@@ -6125,19 +6166,6 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
       job = withYourTerms(job, data);
-      const specId = copyIdForPosting(data.resumes, draft.company, draft.role, {
-        url: draft.url,
-        draftId: draft.id,
-        resumeId: draft.resumeId,
-        drafts: store.loadDrafts(),
-      });
-      if (overwrite !== true) {
-        const held = editedCopy(specId);
-        if (held) {
-          refuseEdited(held);
-          return;
-        }
-      }
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The

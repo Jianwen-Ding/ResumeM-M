@@ -229,8 +229,18 @@ export function fitHeader(header = document.querySelector('header')) {
     return;
   }
 
+  /*
+   * Laid out as it is with no error showing: an error is the status line's,
+   * and `fitStatus` below decides again where it goes. Measured with one
+   * floating in the corner (`toast`), the status line was off the row and
+   * its room was not asked after, so a resize while an error showed left
+   * the tabs beside a status line 68px wide once the error went (1294px).
+   */
+  const error = status?.classList.contains('err') ?? false;
+  status?.classList.remove('toast', 'err');
+
   // The tabs first: on the one row, with the button at its narrowest.
-  header.classList.remove('tabs-row');
+  header.classList.remove('tabs-row', 'fold-peek', 'fold-name');
   header.classList.add('log-mark-only');
   if (tabs && tabs.scrollWidth > tabs.clientWidth + 1) header.classList.add('tabs-row');
   /*
@@ -241,6 +251,19 @@ export function fitHeader(header = document.querySelector('header')) {
   const row = header.querySelector('h1') ?? chip;
   if (!header.classList.contains('tabs-row') && status && !isFloating(status) && row && statusRoom(header, row) < STATUS_ROOM) {
     header.classList.add('tabs-row');
+  }
+  /*
+   * And on the first row of two, the same question. With the AI chips out —
+   * drafting, results, and the peek — at 640–805px the status line came to
+   * nothing and the "!" went onto a row of its own: a header 110–147px tall.
+   * What gives way first is the peek while the drafting chip shows (the two
+   * open the same run), then the app's name, as on a phone (the mark stays).
+   */
+  if (header.classList.contains('tabs-row') && status && !isFloating(status) && row) {
+    for (const fold of ['fold-peek', 'fold-name']) {
+      if (statusRoom(header, row) >= STATUS_ROOM) break;
+      header.classList.add(fold);
+    }
   }
 
   // Then the button's words, if the status line keeps its room beside them.
@@ -257,6 +280,7 @@ export function fitHeader(header = document.querySelector('header')) {
     if (tabsCut || wrapped || statusRoom(header, chip) < STATUS_ROOM) header.classList.add('log-mark-only');
   }
 
+  if (error) status.classList.add('err');
   fitStatus(status);
   root.style.setProperty('--header-h', `${header.offsetHeight}px`);
 }
@@ -269,16 +293,24 @@ export function fitHeader(header = document.querySelector('header')) {
  * a toolbar of no height; whichever has one is the one on screen.
  */
 function watchToolbars() {
-  const root = document.documentElement;
   const bars = [...document.querySelectorAll('.sticky-toolbar')];
   if (!bars.length || typeof ResizeObserver === 'undefined') return;
-  const measure = () => {
-    const height = Math.max(0, ...bars.map((bar) => bar.offsetHeight));
-    root.style.setProperty('--toolbar-h', `${height}px`);
-  };
-  const observer = new ResizeObserver(measure);
+  const observer = new ResizeObserver(() => measureToolbars());
   for (const bar of bars) observer.observe(bar);
-  measure();
+  measureToolbars();
+}
+
+/**
+ * `--toolbar-h` measured now. The observer above sets it a frame after a tab
+ * is switched, and "Open the error log" and the pairing link scroll at once
+ * after `showTab`: with the last tab's toolbar height still in
+ * `scroll-padding-top`, they landed 100–140px too low. So switching a tab
+ * measures before it returns (see `setupTabs` in app.js).
+ */
+export function measureToolbars() {
+  const bars = [...document.querySelectorAll('.sticky-toolbar')];
+  const height = Math.max(0, ...bars.map((bar) => bar.offsetHeight));
+  document.documentElement.style.setProperty('--toolbar-h', `${height}px`);
 }
 
 /**
