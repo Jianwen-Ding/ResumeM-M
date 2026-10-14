@@ -183,7 +183,21 @@ export function errorLogApi({ log, build, save }: ErrorLogApiOptions): express.R
         save: save(),
         resumeId: body.resumeId,
         applicationId: body.applicationId,
+        // JobHelper's own name for the entry, the same on every try. See `ErrorLog.add`.
+        clientId: body.id,
       });
+      /*
+       * Sent again, and already written: the entry that is there, as 200
+       * rather than 201, and nothing new in the log.
+       */
+      if (result.duplicate) {
+        res.status(200).json({
+          ...result,
+          dir: log().root,
+          message: 'Already in the error log; it was not logged twice.',
+        });
+        return;
+      }
       if (!result.committed) logServerEvent('commit', `An error-log entry was written but not committed: ${result.commitError ?? 'nothing to commit'}`);
       res.status(201).json({
         ...result,

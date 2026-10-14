@@ -461,6 +461,44 @@ describe('the server', () => {
     expect(md).not.toContain(GITHUB_TOKEN);
   });
 
+  /*
+   * JobHelper queues an entry while the store is down and sends it again
+   * until it hears back. A worker stopped after the store wrote it, before the
+   * answer arrived, sent it again — and the log held the report twice.
+   */
+  it('writes an entry sent again under the same id once, and answers the second with the first', async () => {
+    const dir = tempDir('rmm-el-');
+    const server = await aServer(dir);
+    try {
+      const post = (body: unknown) =>
+        fetch(`${server.base}/api/error-log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const id = '74839ea6-1b2c-4d5e-8f90-a1b2c3d4e5f6';
+      const first = await post({ id, description: 'The card froze on Workday', minutes: 2 });
+      expect(first.status).toBe(201);
+      const written = (await first.json()) as { entry: { id: string }; committed: boolean };
+      expect(written.committed).toBe(true);
+
+      const again = await post({ id, description: 'The card froze on Workday', minutes: 2 });
+      expect(again.status).toBe(200);
+      const said = (await again.json()) as { entry: { id: string; description: string }; committed: boolean; duplicate: boolean };
+      expect(said).toMatchObject({ duplicate: true, committed: true, entry: { id: written.entry.id, description: 'The card froze on Workday' } });
+
+      // Two tries in flight at once are one entry as well.
+      const other = '0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0';
+      const both = await Promise.all([post({ id: other, description: 'Twice at once' }), post({ id: other, description: 'Twice at once' })]);
+      expect(both.map((r) => r.status).sort()).toEqual([200, 201]);
+
+      // Without an id — the editor, the CLI — every entry is its own.
+      expect((await post({ description: 'The card froze on Workday' })).status).toBe(201);
+      expect((await post({ description: 'The card froze on Workday' })).status).toBe(201);
+      const status = (await (await fetch(`${server.base}/api/error-log/status`)).json()) as { entries: number };
+      expect(status.entries).toBe(4);
+      expect(git(dir, 'log', '--format=%s').split('\n').filter((l) => l.startsWith('Log:'))).toHaveLength(4);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('answers an unpaired extension as every other route does', async () => {
     const server = await aServer(tempDir('rmm-el-'));
     try {

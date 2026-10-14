@@ -85,6 +85,18 @@ export interface NewEntry {
   save?: string | null;
   resumeId?: unknown;
   applicationId?: unknown;
+  /**
+   * The id the sender gave this entry, when it gives one: JobHelper names
+   * each entry it queues (a UUID) and sends that name with every try. An
+   * entry already written under it is that entry, not another one; see
+   * `add`. The editor and the CLI send none, and each of theirs is new.
+   */
+  clientId?: unknown;
+}
+
+/** A sender's id for an entry, as it may be kept: a short run of letters, digits, `-` and `_`. */
+export function clientIdOf(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(value) ? value : undefined;
 }
 
 /** One entry as the lists show it. */
@@ -295,7 +307,9 @@ export class ErrorLog {
    * the next entry's commit — or `git add` by hand — takes them. Said in the
    * answer, as `committed: false`, with git's reason.
    */
-  async add(input: NewEntry): Promise<{ entry: EntrySummary; committed: boolean; commit?: string; commitError?: string }> {
+  async add(
+    input: NewEntry,
+  ): Promise<{ entry: EntrySummary; committed: boolean; commit?: string; commitError?: string; duplicate?: boolean }> {
     const description = typeof input.description === 'string' ? input.description.trim() : '';
     if (!description) throw new ErrorLogInputError('Say in a few words what went wrong.');
     if (description.length > MAX_DESCRIPTION) {
@@ -323,8 +337,28 @@ export class ErrorLog {
     const events = mergeEvents(input.logs ?? [], { until: at, minutes });
     const said = withoutSecrets(description);
 
+    const clientId = clientIdOf(input.clientId);
+
     await this.ensure();
     return holdSaveForCommit(this.root, async () => {
+      /*
+       * The same entry sent again is the one already written.
+       *
+       * JobHelper queues an entry while the store is down and sends it once
+       * it answers — and Chrome stops its worker when it likes, so a send can
+       * reach here, be written and committed, and its answer go to a worker
+       * that no longer exists. The entry stays queued and goes again, and the
+       * log held the same report twice. Looked for inside the hold, so two
+       * tries in flight at once are one entry too.
+       */
+      if (clientId) {
+        const already = this.findByClientId(clientId);
+        if (already) {
+          const [summary] = await this.list(1, this.entryFolders().indexOf(already));
+          const loose = await this.git(['status', '--porcelain', '--', already]).catch(() => '');
+          if (summary?.id === already) return { entry: summary, committed: !loose.trim(), duplicate: true };
+        }
+      }
       const day = localDay(at);
       const dayDir = path.join(this.root, 'entries', day);
       fs.mkdirSync(dayDir, { recursive: true });
@@ -410,6 +444,7 @@ export class ErrorLog {
     const lines = [
       '---',
       `time: ${at.toISOString()}`,
+      ...(clientIdOf(input.clientId) ? [`client_id: ${clientIdOf(input.clientId)}`] : []),
       `source: ${input.source}`,
       `window_minutes: ${minutes}`,
       `screenshots: ${shots.length}`,
@@ -476,6 +511,26 @@ export class ErrorLog {
     });
     keyed.sort((a, b) => b.time - a.time || b.copy - a.copy || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     return keyed.map((k) => k.id);
+  }
+
+  /** The folder of the entry written under a sender's id, if one was. */
+  private findByClientId(clientId: string): string | undefined {
+    for (const { day, name } of this.entryNames()) {
+      const id = `entries/${day}/${name}`;
+      try {
+        const fd = fs.openSync(path.join(this.root, id, 'entry.md'), 'r');
+        try {
+          const head = Buffer.alloc(512);
+          const n = fs.readSync(fd, head, 0, head.length, 0);
+          if (/^client_id: (.*)$/m.exec(head.subarray(0, n).toString('utf8'))?.[1]?.trim() === clientId) return id;
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        // Unreadable: not this one.
+      }
+    }
+    return undefined;
   }
 
   /** Every entry's folder, by day, in no order. */

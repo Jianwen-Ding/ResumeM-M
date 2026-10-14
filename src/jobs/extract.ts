@@ -5,6 +5,13 @@
  */
 
 import { redactIdentifiers } from './answers.js';
+
+/**
+ * Structured data that declares a JobPosting: `"@type": "JobPosting"`, or the
+ * same in a list (`"@type": ["JobPosting"]`, `["Thing", "JobPosting"]`), which
+ * the string-only pattern took for a page that declares nothing.
+ */
+const DECLARES_JOB_POSTING = /"@type"\s*:\s*(?:\[[^\]]*?)?"?JobPosting/i;
 import {
   cleanRole,
   employerLabel,
@@ -2534,7 +2541,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     why.push(reason);
   };
 
-  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
+  if (DECLARES_JOB_POSTING.test(html)) add(6, 'structured JobPosting data');
   /*
    * By the host, as the boards below are. Read anywhere in the address, a
    * tracker's name in a query string — `?partner=acme.icims.com`, a
@@ -2897,7 +2904,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
     /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);
   const forAJob =
-    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    DECLARES_JOB_POSTING.test(html) ||
     onATracker ||
     BOARD.test(hostOf(url)) ||
     Boolean(companyFromUrl(url)) ||
@@ -2928,7 +2935,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     described >= 3 &&
     APPLY_CALL.test(html);
   const actionable =
-    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    DECLARES_JOB_POSTING.test(html) ||
     (uploadsResume && !notAPosting) ||
     namesARole ||
     appliesInWords ||
@@ -2942,7 +2949,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // in — and a page that is both is still, at this moment, the form.
   let kind: PageKind = 'none';
   if (fillsInAJobForm || uploadsResume) kind = 'application';
-  else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
+  else if (described >= 3 || DECLARES_JOB_POSTING.test(html)) kind = 'posting';
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
   else if (score >= JOB_SHAPED) kind = 'posting';
@@ -3051,7 +3058,7 @@ function postingLinks(html: string, url?: string): number {
 
 /** A page that lists roles and declares none of its own. See the end of `classifyPage`. */
 function listsRoles(html: string, url?: string): boolean {
-  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) return false;
+  if (DECLARES_JOB_POSTING.test(html)) return false;
   if (jobNumberIn(url)) return false;
   const title = readableName(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '') ?? '';
   const role = readTitle(title, { employers: [], unnamed: false, onBoard: false }).role;
