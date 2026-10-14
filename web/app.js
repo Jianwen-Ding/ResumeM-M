@@ -20,6 +20,7 @@ import { markupFragment, plainMarkup } from './markup.js';
 import { setupCompact } from './compact.js';
 import { setupEmbed } from './embed.js';
 import { captureEditorErrors, recordEditorEvent, recordFailedRequest, setupErrorLog } from './errorlog.js';
+import { fitStatus, setupHeader } from './header.js';
 let activeProject;
 /** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
 let compact = null;
@@ -373,10 +374,11 @@ function clearEdits() {
 let statusTimer;
 /**
  * A word in the header. One line there, cut short with an ellipsis when it is
- * long, so a long name in "Renamed to …" or a long error does not squeeze the
- * tabs; the whole sentence is its title, and all of it is still the text a
- * screen reader is given (the element is a live region). Narrow, it floats at
- * the bottom instead, where it can wrap without moving the toolbar.
+ * long, so a long name in "Renamed to …" does not squeeze the tabs; the whole
+ * sentence is its title, and all of it is still the text a screen reader is
+ * given (the element is a live region). An error is not cut: it wraps onto a
+ * second line, and one longer than that floats whole in the corner, as every
+ * status does on a phone, where it can wrap without moving the toolbar.
  */
 function setStatus(text, isError = false) {
   // Every red line the person was shown, for the error log. See errorlog.js.
@@ -385,6 +387,8 @@ function setStatus(text, isError = false) {
   s.textContent = text;
   s.title = text;
   s.className = isError ? 'status err' : 'status';
+  // An error wraps in the header, or floats whole if it is longer. See header.js.
+  fitStatus(s);
   clearTimeout(statusTimer);
   if (text && !isError) {
     statusTimer = setTimeout(() => {
@@ -571,11 +575,15 @@ async function api(path, options = {}) {
   } catch (err) {
     // For the error log: the route and that it never arrived. See errorlog.js.
     recordFailedRequest(method, url, null, err?.message);
+    // A request that never arrived (not one cancelled on purpose).
+    if (unreachable(err)) serverReached(false);
     throw err;
   } finally {
     if (order) unsettledOrders.delete(Number(order));
     if (writes) writesOut--;
   }
+  // Answered, even if with a refusal: the server is there.
+  serverReached(true);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) recordFailedRequest(method, url, res.status, body.error ?? res.statusText);
   // With the reply, which for a refused save says what is there now.
@@ -6901,19 +6909,56 @@ function clearPdf(frame) {
   frame.classList.remove('loaded');
 }
 
-/** The "is what I see current?" indicator that replaced the Preview button. */
+/**
+ * The "is what I see current?" indicator that replaced the Preview button.
+ *
+ * Two things decide it: how the last compile went (`liveMode`), and whether
+ * the server answered the last request of any kind (`serverDown`). It used to
+ * hear only from the compile, so a save that could not reach a stopped server
+ * left it green, saying "Live", over an edit that had gone nowhere — the
+ * preview is only asked again after a save, and the save had failed. Any
+ * request that never arrives now turns it to "Can’t reach server", and the
+ * next one answered turns it back. See `api`.
+ */
+let liveMode = 'ok';
+let serverDown = false;
+
+const LIVE_WORDS = {
+  working: 'Updating…',
+  bad: 'Compile failed',
+  offline: 'Can’t reach server',
+  ok: 'Live',
+};
+
 function setLive(mode) {
+  if (mode === 'offline') serverDown = true;
+  else liveMode = mode;
+  paintLive();
+}
+
+/** Whether a request reached the server; from `api`, for every request. */
+function serverReached(reached) {
+  if (serverDown === !reached) return;
+  serverDown = !reached;
+  paintLive();
+}
+
+function paintLive() {
   const chip = $('#live-state');
   if (!chip) return;
+  const mode = serverDown ? 'offline' : liveMode;
   chip.className = `live ${mode}`;
-  chip.textContent =
-    mode === 'working'
-      ? 'Updating…'
-      : mode === 'bad'
-        ? 'Compile failed'
-        : mode === 'offline'
-          ? 'Can’t reach server'
-          : 'Live';
+  chip.textContent = LIVE_WORDS[mode];
+  /*
+   * Its words in its title as well: on a phone the words are hidden and the
+   * dot is all there is (see style.css), so the title says what the colour
+   * means, for a pointer, a long press and a screen reader's description.
+   */
+  chip.title = `${LIVE_WORDS[mode]} — ${
+    mode === 'offline'
+      ? 'the server isn’t answering, so changes aren’t being saved or compiled. It is asked again every few seconds.'
+      : 'the preview recompiles itself whenever you change something. Click to force one.'
+  }`;
 }
 
 /**
@@ -13835,6 +13880,8 @@ async function boot() {
    * than not being there.
    */
   renderDraftingChip();
+  // Every tab in sight at every width. See header.js.
+  setupHeader();
 
   /*
    * The error log, before anything that needs a save: an error is worth
