@@ -762,6 +762,16 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 \\raggedright
 \\setlength{\\tabcolsep}{0in}
 
+% One space after a full stop, the width of every other.
+%
+% TeX widens the space after a full stop that follows a lower-case letter, as
+% the end of a sentence — and on a resume that is nearly always an
+% abbreviation. Every date set "Sep. 2022" with a third more space after the
+% month than "May 2026" two words along, which reads as a stray double space
+% beside the dates of every entry; "Inc.", "approx." and "e.g." the same.
+% After the packages, so babel's language set-up does not undo it.
+\\AtBeginDocument{\\frenchspacing}
+
 \\titleformat{\\section}{%
   \\vspace{-4\\rmmunit}\\scshape\\raggedright\\large
 }{}{0em}{}[\\color{black}\\titlerule \\vspace{-5\\rmmunit}]

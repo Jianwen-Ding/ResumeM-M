@@ -33,7 +33,7 @@ afterEach(() => {
 let saved;
 let inflight;
 
-async function openEditor() {
+async function openEditor(prepare = () => {}) {
   vi.resetModules();
   vi.useFakeTimers();
   document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
@@ -41,6 +41,7 @@ async function openEditor() {
   const fixture = makeTempStore();
   const data = fixture.store.load();
   fixture.cleanup();
+  prepare(data);
 
   saved = [];
   inflight = 0;
@@ -271,5 +272,35 @@ describe('deleting two skills quickly', () => {
     const group = data.skillGroups.find((g) => g.id === 'sk_lang');
     expect(group.items.map((i) => i.text)).not.toContain('Python');
     expect(group.items.map((i) => i.text)).not.toContain('Go');
+  });
+});
+
+/*
+ * An item added to a list line ("Relevant Coursework: …") is named after its
+ * text, and "C++" and "C#" are both `i_c` — as is every item written in a
+ * script with no a–z in it, `i_`. Two items with one id were shown and hidden
+ * together on every resume, and removing either removed both.
+ */
+describe('adding two list items whose names make the same id', () => {
+  async function addItem(text) {
+    const before = saved.length;
+    [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '+ item').click();
+    await vi.waitFor(() => expect(document.querySelector('#f_text')).not.toBeNull());
+    document.querySelector('#f_text').value = text;
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(before));
+    await settle();
+  }
+
+  it('gives them different ids', async () => {
+    await openEditor((data) => {
+      const school = data.entries.find((e) => e.id === 'edu_neu');
+      school.bullets.push({ id: 'b_list', default: 'v_list', prefix: '**Courses:**', separator: ', ', variants: [], items: [{ id: 'i_c', text: 'C' }] });
+    });
+    await addItem('C++');
+    await addItem('C#');
+    const items = saved.at(-1).bullets.find((b) => b.id === 'b_list').items;
+    expect(items.map((i) => i.text)).toEqual(['C', 'C++', 'C#']);
+    expect(new Set(items.map((i) => i.id)).size).toBe(3);
   });
 });

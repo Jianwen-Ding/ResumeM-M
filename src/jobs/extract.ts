@@ -1097,12 +1097,20 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
       if (obj['@graph']) queue.push(obj['@graph']);
 
       if (obj['@type'] === 'JobPosting' || (Array.isArray(obj['@type']) && obj['@type'].includes('JobPosting'))) {
-        const org = obj.hiringOrganization as Record<string, unknown> | undefined;
-        const loc = obj.jobLocation as Record<string, unknown> | undefined;
-        const addr = (Array.isArray(loc) ? loc[0] : loc)?.['address'] as Record<string, unknown> | undefined;
+        /*
+         * Each of these may be a list, as `@type` may, and the employer may be
+         * given as its bare name: `"hiringOrganization": "Globex"` and
+         * `[{ "name": "Globex" }]` both named nobody, and the row was filed
+         * under whatever the page title or the address said instead.
+         */
+        const first = (v: unknown) => (Array.isArray(v) ? v[0] : v);
+        const org = first(obj.hiringOrganization) as Record<string, unknown> | string | undefined;
+        const loc = first(obj.jobLocation) as Record<string, unknown> | undefined;
+        const addr = first(loc?.['address']) as Record<string, unknown> | undefined;
+        const employer = typeof org === 'string' ? org : org?.name;
         return {
           title: typeof obj.title === 'string' ? readableName(obj.title) : undefined,
-          company: typeof org?.name === 'string' ? readableName(org.name) : undefined,
+          company: typeof employer === 'string' ? readableName(employer) : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
           description: typeof obj.description === 'string' ? jsonLdDescription(obj.description) : '',
           facts: jsonLdFacts(obj),
@@ -1114,14 +1122,35 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
   return undefined;
 }
 
+/*
+ * A tag's attributes read as HTML writes them: each value runs to its own
+ * closing quote, and the attributes come in any order.
+ *
+ * This was one pattern, `property=… content=["']([^"']+)["']`, which stopped
+ * a value at the first quote of either kind — so "Macy's" as the site's name
+ * filed the application under "Macy", and an `og:title` of "Women's Health
+ * Data Scientist" was the role "Women" — and read only a `content` written
+ * after the name, which plenty of pages put first.
+ */
+const META_TAG = /<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+const ATTRIBUTE = /([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+
 function metaContent(html: string, names: string[]): string | undefined {
+  const tags = [...html.matchAll(META_TAG)].map((tag) => {
+    const attributes = new Map<string, string>();
+    for (const m of tag[0].matchAll(ATTRIBUTE)) {
+      const key = m[1]!.toLowerCase();
+      if (!attributes.has(key)) attributes.set(key, m[2] ?? m[3] ?? m[4] ?? '');
+    }
+    return attributes;
+  });
   for (const name of names) {
-    const re = new RegExp(
-      `<meta[^>]+(?:property|name)=["']${name}["'][^>]+content=["']([^"']+)["']`,
-      'i',
-    );
-    const m = re.exec(html);
-    if (m?.[1]) return readableName(m[1]);
+    const wanted = name.toLowerCase();
+    for (const attributes of tags) {
+      const named = [attributes.get('property'), attributes.get('name')].some((n) => n?.toLowerCase() === wanted);
+      const content = attributes.get('content');
+      if (named && content) return readableName(content);
+    }
   }
   return undefined;
 }

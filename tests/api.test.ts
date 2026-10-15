@@ -207,6 +207,16 @@ describe('adding a phrasing', () => {
     expect(res.body.error).toMatch(/already exists/);
   });
 
+  it('numbers a second phrasing with the same label rather than refusing it', async () => {
+    // What the editor sends for a phrasing added with the label left empty.
+    const add = (text: string) =>
+      request(app).post('/api/entries/exp_acme/bullets/b_pipeline/variants').send({ label: 'New phrasing', text }).expect(200);
+    expect((await add('One wording.')).body.id).toBe('v_new-phrasing');
+    expect((await add('Another wording.')).body.id).toBe('v_new-phrasing_2');
+    const bullet = t.store.load().entries.find((e) => e.id === 'exp_acme')?.bullets?.find((b) => b.id === 'b_pipeline');
+    expect(bullet?.variants.map((v) => v.text)).toEqual(expect.arrayContaining(['One wording.', 'Another wording.']));
+  });
+
   it('names a missing entry or bullet', async () => {
     expect(
       (await request(app).post('/api/entries/ghost/bullets/b/variants').send({ text: 'x' }).expect(400)).body.error,

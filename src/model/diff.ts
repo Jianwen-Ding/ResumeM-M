@@ -68,8 +68,24 @@ function diffEntryFields(before: ResolvedEntry, after: ResolvedEntry, out: DocCh
   for (const field of ['title', 'dates', 'subtitle', 'location'] as const) {
     const b = plain(before[field] ?? '');
     const a = plain(after[field] ?? '');
-    if (b === a) continue;
     const where = plain(after.title || before.title);
+    /*
+     * Same words, different markup, as `diffBullets` says of a bullet: a
+     * title set in bold is a change `sameDocument` sees, and saying nothing
+     * left a version with an empty change list.
+     */
+    if (b === a) {
+      if ((before[field] ?? '') !== (after[field] ?? '')) {
+        out.push({
+          kind: 'changed',
+          where,
+          from: before[field] ?? '',
+          to: after[field] ?? '',
+          text: `${where}: ${FIELD_WORDS[field]} — same words, different formatting`,
+        });
+      }
+      continue;
+    }
     out.push({
       kind: 'changed',
       where,
@@ -176,6 +192,10 @@ function diffSkills(before: ResolvedResume, after: ResolvedResume, out: DocChang
     const added = items.filter((i) => !was.includes(i));
     const gone = was.filter((i) => !items.includes(i));
     if (added.length) out.push({ kind: 'added', where: name, text: `${name}: added ${added.join(', ')}` });
+    // The same items in another order print as another line.
+    if (!added.length && !gone.length && items.join('\u0000') !== was.join('\u0000')) {
+      out.push({ kind: 'moved', where: name, text: `${name}: reordered` });
+    }
     if (gone.length) {
       /*
        * What is left, not only what went.
@@ -195,6 +215,12 @@ function diffSkills(before: ResolvedResume, after: ResolvedResume, out: DocChang
   }
   for (const [name] of b) {
     if (!a.has(name)) out.push({ kind: 'removed', where: name, text: `Skills: dropped "${name}"` });
+  }
+  // And the order the lines print in, among the groups both versions have.
+  const bOrder = [...b.keys()].filter((name) => a.has(name));
+  const aOrder = [...a.keys()].filter((name) => b.has(name));
+  if (bOrder.join('\u0000') !== aOrder.join('\u0000')) {
+    out.push({ kind: 'moved', text: 'Skills: lines reordered' });
   }
 }
 
@@ -275,10 +301,26 @@ export function diffResumes(
    * entry (see `diffBullets`), but never the entries of a section, so a move
    * reported here is the person's.
    */
-  const bOrder = [...bEntries.keys()].filter((id) => aEntries.has(id));
-  const aOrder = [...aEntries.keys()].filter((id) => bEntries.has(id));
-  if (bOrder.join() !== aOrder.join()) {
+  /*
+   * Within each section, and the sections themselves apart from that.
+   *
+   * Compared over the flattened list, moving a whole section — Projects
+   * above Experience — read as "Reordered" when both held entries and as
+   * nothing when one was the skills, which has none, and the version had an
+   * empty change list. An entry that changed section is `diffSectionMoves`'s.
+   */
+  const inKind = (entries: typeof aEntries, others: typeof aEntries, kind: string) =>
+    [...entries]
+      .filter(([id, { section }]) => section.kind === kind && others.get(id)?.section.kind === kind)
+      .map(([id]) => id);
+  const kinds = new Set(after.sections.map((s) => s.kind));
+  if ([...kinds].some((kind) => inKind(bEntries, aEntries, kind).join() !== inKind(aEntries, bEntries, kind).join())) {
     out.push({ kind: 'moved', text: 'Reordered' });
+  }
+  const bKinds = before.sections.map((s) => s.kind).filter((kind) => kinds.has(kind));
+  const aKinds = after.sections.map((s) => s.kind).filter((kind) => bKinds.includes(kind));
+  if (bKinds.join() !== aKinds.join()) {
+    out.push({ kind: 'moved', text: 'Sections reordered' });
   }
 
   // As pinned, since that is the name the document shows. Switching which

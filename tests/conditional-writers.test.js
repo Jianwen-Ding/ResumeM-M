@@ -329,4 +329,22 @@ describe('the editor’s other resume writes, over a write made elsewhere', () =
     expect(data.resumes.filter((r) => r.id === 'intern-variant').map((r) => r.label)).toEqual(['Made by the card']);
     expect(modalOpen(), 'asked again').toBe(true);
   });
+
+  it('Save as variation: asks again for a filename when the one given has nothing to make it from', async () => {
+    const { data } = await openOn('intern');
+    const was = data.resumes.length;
+    document.querySelector('#btn-save-as').click();
+    await vi.waitFor(() => expect(field('label')).toBeTruthy());
+    field('label').value = '简历';
+    field('id').value = '';
+    document.querySelector('#modal-ok').click();
+
+    await vi.waitFor(() => expect(document.querySelector('#modal-note')?.textContent).toMatch(/no letters a–z or digits/));
+    expect(modalOpen(), 'asked again').toBe(true);
+    expect(field('label').value).toBe('简历');
+    field('id').value = 'jianli';
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(data.resumes.length).toBe(was + 1));
+    expect(data.resumes.find((r) => r.id === 'jianli')?.label).toBe('简历');
+  });
 });

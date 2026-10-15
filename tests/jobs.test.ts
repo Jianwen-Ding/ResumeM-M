@@ -153,6 +153,44 @@ describe('a title with its entities escaped twice', () => {
     expect(titled.company).toBe('Acme & Co');
   });
 
+  /*
+   * A value runs to its own closing quote, and `content` may come first: an
+   * apostrophe cut "Macy's" to "Macy" and "Women's Health Data Scientist" to
+   * "Women", and a tag written content-first was not read at all.
+   */
+  it('reads a meta tag with an apostrophe in it, or its attributes the other way round', () => {
+    const page = (meta: string) =>
+      `<html><head><title>Careers</title>${meta}</head><body><p>${'We build things. '.repeat(30)}</p></body></html>`;
+    const url = 'https://careers.example.org/jobs/123';
+    const quoted = extractJob(
+      page(`<meta property="og:site_name" content="Macy's"><meta property="og:title" content="Women's Health Data Scientist">`),
+      url,
+    );
+    expect(quoted.company).toBe("Macy's");
+    expect(quoted.title).toBe("Women's Health Data Scientist");
+    const reversed = extractJob(
+      page(`<meta content="Data Analyst Intern" property="og:title"><meta content="Acme" property="og:site_name">`),
+      url,
+    );
+    expect(reversed.title).toBe('Data Analyst Intern');
+    expect(reversed.company).toBe('Acme');
+  });
+
+  /*
+   * JSON-LD's employer and address in the other shapes schema.org allows: the
+   * employer as its bare name or in a list, the address in a list. Each was
+   * read as no employer and no place.
+   */
+  it('reads the employer and place from JSON-LD given as a name or a list', () => {
+    const page = (fields: string) =>
+      `<html><head><title>Careers</title><script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Data Analyst Intern",${fields},"description":"<p>Work.</p>"}</script></head><body></body></html>`;
+    const url = 'https://careers.example.org/jobs/123';
+    expect(extractJob(page('"hiringOrganization":"Globex"'), url).company).toBe('Globex');
+    expect(extractJob(page('"hiringOrganization":[{"@type":"Organization","name":"Globex"}]'), url).company).toBe('Globex');
+    const placed = extractJob(page('"hiringOrganization":{"name":"Globex"},"jobLocation":{"address":[{"addressLocality":"Austin","addressRegion":"TX"}]}'), url);
+    expect(placed.location).toBe('Austin, TX');
+  });
+
   it('never leaves entity text in a title or employer, merged across pages', () => {
     const merged = mergeJobPages([
       {

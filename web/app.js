@@ -6329,7 +6329,12 @@ async function addListItem(entry, bullet) {
   ], 'Tags are what the extension matches against a job posting.');
   if (!answer?.text?.trim()) return;
 
-  const id = `i_${slug(answer.text)}`;
+  /*
+   * Not an id the list already has. "C++" and "C#" are both `i_c`, and any
+   * item in a script with no a–z in it is `i_`: two items with one id were
+   * shown and hidden together, and removing either removed both.
+   */
+  const id = unusedId(`i_${slug(answer.text)}`, (bullet.items ?? []).map((i) => i.id));
   const next = {
     ...entry,
     bullets: entry.bullets.map((b) =>
@@ -7681,7 +7686,16 @@ async function saveAsVariation() {
      */
     const chosenLabel = label.trim();
     const chosenId = slug(filename.trim() || chosenLabel || '');
-    if (!chosenId) return;
+    /*
+     * Nor a name a filename cannot be made from. A filename is made of a–z
+     * and digits, so "简历" for either box made none, and the form closed on
+     * a variation that did not exist, as a cleared box once did.
+     */
+    if (!chosenId) {
+      if (!filename.trim() && !chosenLabel) return;
+      problem = `“${filename.trim() || chosenLabel}” has no letters a–z or digits to make a filename from. Choose a filename that has.`;
+      continue;
+    }
     const clash = (state.store.resumes ?? []).find(
       (r) => r.id === chosenId || (chosenLabel && sameName(r.label ?? r.id, chosenLabel)),
     );

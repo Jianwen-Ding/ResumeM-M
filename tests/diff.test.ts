@@ -294,6 +294,36 @@ describe('diffing two versions of a resume', () => {
     expect(changes.map((c) => c.text).join(' ')).toMatch(/different formatting/i);
   });
 
+  /*
+   * Four more edits a reader sees that made a version and said nothing:
+   * skills reordered inside a line, the skill lines reordered, whole
+   * sections reordered, and an entry's title set in bold.
+   */
+  it('says something about every reorder and every formatting change it counts as a version', () => {
+    const withSkills = doc();
+    withSkills.sections.push({
+      kind: 'skills',
+      heading: 'Technical Skills',
+      skillGroups: [
+        { id: 'g1', name: 'Languages', items: ['Go', 'Python'] },
+        { id: 'g2', name: 'Tools', items: ['Git'] },
+      ],
+      entries: [],
+    });
+    const cases: [string, (d: ResolvedResume) => void, RegExp][] = [
+      ['items', (d) => d.sections[2]!.skillGroups[0]!.items.reverse(), /Languages: reordered/],
+      ['groups', (d) => d.sections[2]!.skillGroups.reverse(), /lines reordered/],
+      ['sections', (d) => d.sections.reverse(), /Sections reordered/],
+      ['title', (d) => { d.sections[0]!.entries[0]!.title = '**Acme Co.**'; }, /different formatting/],
+    ];
+    for (const [, fn, said] of cases) {
+      const after = structuredClone(withSkills);
+      fn(after);
+      expect(sameDocument(withSkills, after)).toBe(false);
+      expect(diffResumes(withSkills, after).map((c) => c.text).join(' | ')).toMatch(said);
+    }
+  });
+
   it('finds nothing to say about an identical document', () => {
     expect(diffResumes(doc(), doc())).toEqual([]);
   });

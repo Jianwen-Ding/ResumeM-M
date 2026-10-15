@@ -2125,17 +2125,28 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const body = req.body as Partial<Variant> & { makeDefault?: boolean };
       if (!body.text?.trim()) throw new Error('A variant needs text');
       const text = body.text.trim();
-      const id = body.id?.trim() || `v_${slug(body.label ?? text.slice(0, 20)) || Date.now()}`;
+      const asked = body.id?.trim();
+      const made = `v_${slug(body.label ?? text.slice(0, 20)) || Date.now()}`;
 
       // Read, changed and written under the save's lock: see `/answers/save`.
-      const variant = await withCommit(repo, autoCommit(), `Add variant "${id}" to bullet "${bulletId}"`, () => {
+      const variant = await withCommit(repo, autoCommit(), `Add variant "${asked || made}" to bullet "${bulletId}"`, () => {
         const data = store.load();
         const entry = data.entries.find((e) => e.id === entryId);
         if (!entry) throw new Error(`No entry "${entryId}"`);
         const bullet = (entry.bullets ?? []).find((b) => b.id === bulletId);
         if (!bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
 
-        if (bullet.variants.some((v) => v.id === id)) throw new Error(`Variant "${id}" already exists`);
+        /*
+         * An id the caller chose is refused when taken; one made from the
+         * label is numbered past the ones there. The editor sends no id and
+         * "New phrasing" for an empty label, so a second unlabelled phrasing
+         * on one bullet — or a second "Short" — was refused as a duplicate
+         * of an id the person never saw.
+         */
+        const taken = new Set(bullet.variants.map((v) => v.id));
+        if (asked && taken.has(asked)) throw new Error(`Variant "${asked}" already exists`);
+        let id = asked || made;
+        for (let n = 2; taken.has(id); n++) id = `${made}_${n}`;
 
         const variant: Variant = {
           id,

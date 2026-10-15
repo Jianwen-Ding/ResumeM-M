@@ -169,6 +169,36 @@ describe.runIf(hasEngine && hasPdfInfo)('rendering pipeline bugs', { timeout: 30
   });
 
   /*
+   * The space after an abbreviated month. TeX widens a space after a full
+   * stop that follows a lower-case letter, as the end of a sentence, so
+   * "Jul. 2024" was set with a third more space after the month than any
+   * other word gap: a stray double space beside every entry's dates. In the
+   * preview as well as the PDF that goes out.
+   */
+  it('sets "Jul. 2024" with an ordinary word space', async () => {
+    const dir = tmp();
+    try {
+      for (const mode of ['final', 'preview'] as const) {
+        const r = resume(1);
+        r.sections[0]!.entries[0]!.dates = 'Jul. 2024 -- May 2025';
+        const pdf = path.join(dir, `${mode}.pdf`);
+        await compileResume(r, { pdfPath: pdf, mode });
+        const html = path.join(dir, `${mode}.html`);
+        await run('pdftotext', ['-bbox', pdf, html]);
+        const words = [...fs.readFileSync(html, 'utf8').matchAll(/xMin="([\d.]+)" yMin="[\d.]+" xMax="([\d.]+)" yMax="[\d.]+">([^<]*)<\/word>/g)]
+          .map((m) => ({ from: Number(m[1]), to: Number(m[2]), word: m[3] }));
+        const gapAfter = (word: string) => {
+          const at = words.findIndex((w) => w.word === word);
+          return words[at + 1]!.from - words[at]!.to;
+        };
+        expect(gapAfter('Jul.'), mode).toBeCloseTo(gapAfter('May'), 1);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /*
    * BUG 4 — `hasSignOff` searches the last four lines for the bare words
    * "sincerely|regards|best|thank you|yours" at end of line. A paragraph that
    * merely contains one of them suppresses the closing, and the letter is sent
